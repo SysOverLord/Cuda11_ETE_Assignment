@@ -13,6 +13,7 @@
 #include<windows.h>
 //for linux
 //#include<unistd.h>
+#define TEAM_SIZE 400
 
 
 struct Runner {
@@ -29,7 +30,8 @@ struct Team {
 
 cudaError_t createTeamsWithCuda(Team* teams, Runner* runners, const int size);
 
-cudaError_t simulateRaceWithCuda(Team* teams, Runner* runners, int* finished_team_count, int* placements, const int size);
+//cudaError_t simulateRaceWithCuda(Team* teams, Runner* runners, int* finished_team_count, int* placements, const int size);
+cudaError_t simulateRaceWithCuda(Team* teams, Runner* runners, int* finishedTeamCount, int* placements, int* consoleTeams, const int consoleSize, const int size);
 
 __device__ int lock = 0;
 
@@ -64,10 +66,8 @@ __global__ void simulateRaceKernel(Team* teams, Runner* runners, int* finished_t
 		return;
 	}
 
-	if (teams[i].runners[*curRunner].dist < (*curRunner + 1) * 100)
-	{
-		teams[i].runners[*curRunner].dist += teams[i].runners[*curRunner].vel;
-	}
+	teams[i].runners[*curRunner].dist += teams[i].runners[*curRunner].vel;
+	
 
 	if (teams[i].runners[*curRunner].dist >= (*curRunner + 1) * 100)
 	{
@@ -78,43 +78,41 @@ __global__ void simulateRaceKernel(Team* teams, Runner* runners, int* finished_t
 	if (*curRunner == 4)
 	{
 
-		//Race condition can not be paralel
-		//Because threads can get asynchronous counts
-		//Other solution in my mind was before calling kernel for every 400 threads
-		//Count the curRunner == 4 flag to check if all 400 teams have finished the race
-		//But that meant every second (Each Run) program would need to count from scratch
-		//So This SingleThreaded madness must take place here.
-		//Because Some teams finish very early and at most there was only 30-40 threads on lock.
+		int place_index = atomicAdd(finished_team_count, 1);
+		placements[place_index] = i;
+		if (place_index == 0)
+		{
+			printf("\nFirst team to arrive finish line is Team %d\n", i + 1);
+			printf("-----------------------------------------------\n");
+			for (int j = 0; j < 4; j++)
+			{
+				printf("Team %d Runner %d VEL:%d DIST:%d\n", i + 1, j + 1, teams[i].runners[j].vel, teams[i].runners[j].dist);
+			}
+			//printf("-----------------------------------------------\n");
 
-		bool leaveLoop = false;
-		while (!leaveLoop) {
-			if (atomicExch(&lock, 1u) == 0u) {
-				placements[*finished_team_count] = i;
-				if (*finished_team_count == 0)
+			for (int k = 0; k < TEAM_SIZE; k++)
+			{
+				int tmpRunner = teams[k].curRunner;
+				if (tmpRunner == 4)
 				{
-					printf("\nFirst team to arrive finish line is Team %d\n", i + 1);
-					printf("-----------------------------------------------\n");
-					for (int j = 0; j < 4; j++)
-					{
-						printf("Team %d Runner %d VEL:%d DIST:%d\n", i + 1, j + 1, teams[i].runners[j].vel, teams[i].runners[j].dist);
-					}
-					printf("-----------------------------------------------\n");
+					tmpRunner -= 1;
 				}
-				*finished_team_count += 1;
-				leaveLoop = true;
-				atomicExch(&lock, 0u);
+
+				printf("-----------------------------------------------\n");
+				printf("Team %d Current Runner %d VEL:%d DIST:%d\n", k + 1, tmpRunner + 1, teams[k].runners[tmpRunner].vel, teams[k].runners[tmpRunner].dist);
 			}
 		}
-
 	}
 
 
 	else
 	{
+		//Race has not ended for this team.
+		//Give new velocity to calculate next distance.
 		curandState_t state;
 		curand_init(rand_seed, i, 0, &state);
 
-		teams[i].runners[*curRunner].vel = curand_uniform(&state) * 5 + 1;
+		teams[i].runners[*curRunner].vel = ceil(curand_uniform(&state) * 5);
 	}
 }
 
@@ -124,8 +122,6 @@ __global__ void simulateRaceKernel(Team* teams, Runner* runners, int* finished_t
 
 int main(int argc, char* argv[])
 {
-	//400 olucak ama test için 5
-	const int TEAM_SIZE = 400;
 
 	//pointer for objects
 	Team* teams = new Team[TEAM_SIZE];
@@ -151,7 +147,7 @@ int main(int argc, char* argv[])
 	if (argc <= 1)
 	{
 		consoleTeams = new int[TEAM_SIZE];
-		printf("No arguments are passed while running the program.\nPlease state which teams will be shown on the console.\n");
+		printf("No arguments were passed while running the program.\nPlease state which teams will be shown on the console.\n");
 		printf("All numbers must be seperated by space\n");
 		do {
 			scanf("%d", &consoleTeams[consoleSize++]);
@@ -180,39 +176,8 @@ int main(int argc, char* argv[])
 
 	}
 
-	while (finished_team_count < TEAM_SIZE)
-	{
-		simulateRaceWithCuda(teams, runners, &finished_team_count, placements, TEAM_SIZE);
-		//Pointers must be reassigned because 
-		//Pointer values on the objects are for gpu memory (video-ram)
-		//They are needed to be repointed to cpu memory (ram or virtual ram)
-		for (int i = 0; i < TEAM_SIZE; i++)
-		{
-			teams[i].runners = &runners[i * 4];
-		}
+	simulateRaceWithCuda(teams, runners, &finished_team_count, placements, consoleTeams, consoleSize, TEAM_SIZE);
 
-		for (int i = 0; i < consoleSize; i++)
-		{
-			printf("-------------------------\n");
-			int outTeam = consoleTeams[i];
-			for (int j = 0; j < 4; j++)
-			{
-				printf("Team %d Runner %d VEL:%d DIST:%d\n", outTeam, j + 1, teams[outTeam - 1].runners[j].vel, teams[outTeam - 1].runners[j].dist);
-			}
-		}
-
-
-		printf("-------------------------\n");
-		printf("Finished Team Count:%d\n", finished_team_count);
-		printf("|||||||||||||||||||||||||\n");
-
-		//Sleep function in windows is in milliseconds
-		//1000 olucak
-		Sleep(1 * 1000);
-		//For linux based
-		// It is in seconds for linux.
-		//sleep(1);
-	}
 
 	printf("Race has ended The Results are\n");;
 
@@ -238,7 +203,7 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
-cudaError_t simulateRaceWithCuda(Team* teams, Runner* runners, int* finished_team_count, int* placements, const int size)
+cudaError_t simulateRaceWithCuda(Team* teams, Runner* runners, int* finishedTeamCount, int* placements, int* consoleTeams, const int consoleSize, const int size)
 {
 	Team* dev_teams;
 	Runner* dev_runners;
@@ -246,17 +211,13 @@ cudaError_t simulateRaceWithCuda(Team* teams, Runner* runners, int* finished_tea
 	int* dev_count;
 	cudaError_t cudaStatus;
 
-	srand(time(NULL));
-	int rand_seed = rand() % 500 + 1000;
-
-
 	// Choose which GPU to run on, change this on a multi-GPU system.
 	cudaStatus = cudaSetDevice(0);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
 		goto Error;
 	}
-
+	//Memory allocation and Memory copy for host to device.
 	cudaStatus = cudaMalloc((void**)&dev_placements, size * sizeof(int));
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMalloc failed!");
@@ -292,7 +253,6 @@ cudaError_t simulateRaceWithCuda(Team* teams, Runner* runners, int* finished_tea
 	}
 
 
-	// Copy input vectors from host memory to GPU buffers.
 	cudaStatus = cudaMemcpy(dev_runners, runners, size * sizeof(Runner) * 4, cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaMemcpy failed!");
@@ -306,57 +266,96 @@ cudaError_t simulateRaceWithCuda(Team* teams, Runner* runners, int* finished_tea
 	}
 
 
-	cudaStatus = cudaMemcpy(dev_count, finished_team_count, sizeof(int), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpy(dev_count, finishedTeamCount, sizeof(int), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy on flag failed!\n");
+		fprintf(stderr, "cudaMemcpy failed!");
 		goto Error;
 	}
 
-	// Launch a kernel on the GPU with one thread for each element.
-	simulateRaceKernel << <1, size >> > (dev_teams, dev_runners, dev_count, dev_placements, rand_seed);
+	//End of Memory Allocation and Memory Copy
 
-	// Check for any errors launching the kernel
-	cudaStatus = cudaGetLastError();
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "simulateRaceKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-		goto Error;
+	//Start race loop
+	while (*finishedTeamCount < TEAM_SIZE) {
+
+		srand(time(NULL));
+		int rand_seed = rand() % 500 + 1000;
+
+		// Launch a kernel on the GPU with one thread for each element.
+		simulateRaceKernel <<<1, size >>> (dev_teams, dev_runners, dev_count, dev_placements, rand_seed);
+
+		// Check for any errors launching the kernel
+		cudaStatus = cudaGetLastError();
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "simulateRaceKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
+			goto Error;
+		}
+
+		// cudaDeviceSynchronize waits for the kernel to finish, and returns
+		// any errors encountered during the launch.
+		cudaStatus = cudaDeviceSynchronize();
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching simulateRaceKernel!\n", cudaStatus);
+			goto Error;
+		}
+
+		// Copy output vectors from GPU buffer to host memory.
+
+		cudaStatus = cudaMemcpy(teams, dev_teams, size * sizeof(Team), cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy device to host on Teams failed!");
+			goto Error;
+		}
+
+
+		cudaStatus = cudaMemcpy(runners, dev_runners, size * sizeof(Runner) * 4, cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy device to host on Runners failed!");
+			goto Error;
+		}
+
+		cudaStatus = cudaMemcpy(finishedTeamCount, dev_count, sizeof(int), cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy device to host on count failed!");
+			goto Error;
+		}
+
+		cudaStatus = cudaMemcpy(placements, dev_placements, size * sizeof(int), cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "cudaMemcpy device to host on placements failed!");
+			goto Error;
+		}
+
+		//Pointers must be reassigned. 
+		//Pointer values on the objects are for gpu memory (video-ram).
+		//They are needed to be repointed to cpu memory (ram or virtual ram).
+		for (int i = 0; i < TEAM_SIZE; i++)
+		{
+			teams[i].runners = &runners[i * 4];
+		}
+
+		for (int i = 0; i < consoleSize; i++)
+		{
+			printf("-------------------------\n");
+			int outTeam = consoleTeams[i];
+			for (int j = 0; j < 4; j++)
+			{
+				printf("Team %d Runner %d VEL:%d DIST:%d\n", outTeam, j + 1, teams[outTeam - 1].runners[j].vel, teams[outTeam - 1].runners[j].dist);
+			}
+		}
+
+		printf("-------------------------\n");
+		printf("Finished Team Count:%d\n", *finishedTeamCount);
+		printf("|||||||||||||||||||||||||\n");
+
+		//Sleep function in windows is in milliseconds
+		//1000 olucak
+		Sleep(1 * 1000);
+		//For linux based
+		// It is in seconds for linux.
+		//sleep(1);
+
 	}
-
-	// cudaDeviceSynchronize waits for the kernel to finish, and returns
-	// any errors encountered during the launch.
-	cudaStatus = cudaDeviceSynchronize();
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching simulateRaceKernel!\n", cudaStatus);
-		goto Error;
-	}
-
-	// Copy output vector from GPU buffer to host memory.
-
-	cudaStatus = cudaMemcpy(teams, dev_teams, size * sizeof(Team), cudaMemcpyDeviceToHost);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy on Teams failed!");
-		goto Error;
-	}
-
-
-	cudaStatus = cudaMemcpy(runners, dev_runners, size * sizeof(Runner) * 4, cudaMemcpyDeviceToHost);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy on Runners failed!");
-		goto Error;
-	}
-
-	cudaStatus = cudaMemcpy(finished_team_count, dev_count, sizeof(int), cudaMemcpyDeviceToHost);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy on count failed!");
-		goto Error;
-	}
-
-	cudaStatus = cudaMemcpy(placements, dev_placements, size * sizeof(int), cudaMemcpyDeviceToHost);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "cudaMemcpy on placements failed!");
-		goto Error;
-	}
-
+	//End race loop
 
 Error:
 	cudaFree(dev_teams);
